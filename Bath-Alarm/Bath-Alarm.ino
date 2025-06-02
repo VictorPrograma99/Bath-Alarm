@@ -1,14 +1,9 @@
-/*Este codigo contiene la lectura de un 
- * sensor de proximidad y apagar y encender un led con un servidor web
- */
 #include <WiFi.h>
 #include <WebServer.h>
 #include <ESPmDNS.h>
 #include <HTTPClient.h>
-#include <WiFiClient.h>
 
-
-// Red WiFi
+// WiFi
 const char* ssid = "MI GATO ESTIBEN_2.4GHZ";
 const char* password = "Colombia2025";
 
@@ -16,12 +11,11 @@ const char* password = "Colombia2025";
 #define TRIGGER_PIN 3
 #define ECHO_PIN 2
 
-// Pin del LED
+// LED
 #define LED_PIN 8
 
 WebServer server(80);
 
-bool mensajeEnviado = false;
 bool ledManual = false;
 unsigned long lastBlink = 0;
 bool ledState = false;
@@ -29,6 +23,12 @@ bool ledState = false;
 unsigned long presenceStartTime = 0;
 bool objectDetected = false;
 bool ledShouldBlink = false;
+bool mensajeEnviado = false;
+unsigned long mensajeTimestamp = 0;
+
+// CallMeBot config
+String phoneNumber = "573135381900";  // ← Tu número con código país (sin +)
+String apiKey = "4009828";       // ← Tu API key de CallMeBot
 
 // Función para medir distancia
 long readDistance() {
@@ -42,8 +42,64 @@ long readDistance() {
   return distance;
 }
 
-// Página principal
+// Codificador URL simple
+String urlencode(String str) {
+  String encoded = "";
+  char c;
+  char code0, code1;
+  for (int i = 0; i < str.length(); i++) {
+    c = str.charAt(i);
+    if (isalnum(c)) {
+      encoded += c;
+    } else {
+      code0 = (c >> 4) & 0xF;
+      code1 = c & 0xF;
+      encoded += '%';
+      encoded += "0123456789ABCDEF"[code0];
+      encoded += "0123456789ABCDEF"[code1];
+    }
+  }
+  return encoded;
+}
+
+// Enviar mensaje por WhatsApp
+void sendWhatsAppMessage(const String& message) {
+  HTTPClient http;
+  String url = "https://api.callmebot.com/whatsapp.php?phone=" + phoneNumber +
+               "&text=" + urlencode(message) + "&apikey=" + apiKey;
+  http.begin(url);
+  int httpCode = http.GET();
+
+  if (httpCode > 0) {
+    Serial.println("Mensaje enviado con éxito.");
+  } else {
+    Serial.println("Error al enviar mensaje. Código: " + String(httpCode));
+  }
+
+  http.end();
+}
+
+// Realizar llamada por WhatsApp
+void sendWhatsAppCall(const String& message) {
+  HTTPClient http;
+  String url = "https://api.callmebot.com/whatsapp.php?phone=+" + phoneNumber +
+               "&text=" + urlencode(message) + "&apikey=" + apiKey +
+               "&lang=es&voice=male";
+  http.begin(url);
+  int httpCode = http.GET();
+
+  if (httpCode > 0) {
+    Serial.println("Llamada solicitada correctamente.");
+  } else {
+    Serial.println("Error al solicitar llamada. Código: " + String(httpCode));
+  }
+
+  http.end();
+}
+
+// Página HTML
 void handleRoot() {
+  String timestamp = mensajeTimestamp > 0 ? String((millis() - mensajeTimestamp) / 1000) + " s atrás" : "Ninguno";
   String html = R"=====( 
   <!DOCTYPE html>
   <html lang='es'>
@@ -92,6 +148,7 @@ void handleRoot() {
           .then(data => {
             document.getElementById('distancia').innerText = data.distancia + ' cm';
             document.getElementById('tiempo').innerText = data.tiempo + ' s';
+            document.getElementById('ultimo').innerText = data.ultimo;
           });
       }
 
@@ -105,6 +162,8 @@ void handleRoot() {
       <p id='distancia'>Cargando...</p>
       <p>Tiempo desde que se detectó presencia:</p>
       <p id='tiempo'>0 s</p>
+      <p>Último envío:</p>
+      <p id='ultimo'>Cargando...</p>
       <form action="/led/on" method="get">
         <button>Encender LED</button>
       </form>
@@ -119,7 +178,7 @@ void handleRoot() {
   server.send(200, "text/html", html);
 }
 
-// Endpoint JSON con distancia y tiempo
+// JSON con datos para la página
 void handleData() {
   long distance = readDistance();
 
@@ -132,21 +191,27 @@ void handleData() {
     objectDetected = false;
     presenceStartTime = 0;
     ledShouldBlink = false;
-    mensajeEnviado = false;  // Reinicia cuando ya no hay persona
+    mensajeEnviado = false;  // Permite reenviar si vuelve alguien
   }
 
   unsigned long elapsedTime = objectDetected ? (millis() - presenceStartTime) / 1000 : 0;
 
   if (elapsedTime >= 10 && !mensajeEnviado) {
-    sendWhatsAppMessage("¡Se detectó una persona durante más de 10 segundos!");
+    sendWhatsAppMessage("⚠️ Se detectó una persona por más de 10 segundos.");
+    delay(3000); // Pausa para evitar solapamiento
+    sendWhatsAppCall("¡Alerta! Hay alguien en el área durante más de 10 segundos.");
     mensajeEnviado = true;
+    mensajeTimestamp = millis();
+    ledShouldBlink = true;
   }
 
-  String json = "{\"distancia\":" + String(distance) + ",\"tiempo\":" + String(elapsedTime) + "}";
+  String tiempo = String(elapsedTime);
+  String ultimoEnvio = mensajeTimestamp > 0 ? String((millis() - mensajeTimestamp) / 1000) + " s atrás" : "Ninguno";
+  String json = "{\"distancia\":" + String(distance) + ",\"tiempo\":" + tiempo + ",\"ultimo\":\"" + ultimoEnvio + "\"}";
   server.send(200, "application/json", json);
 }
 
-// Encender LED manualmente
+// LED ON
 void handleLedOn() {
   ledManual = true;
   digitalWrite(LED_PIN, HIGH);
@@ -154,7 +219,7 @@ void handleLedOn() {
   server.send(303);
 }
 
-// Apagar LED manualmente
+// LED OFF
 void handleLedOff() {
   ledManual = true;
   digitalWrite(LED_PIN, LOW);
@@ -166,6 +231,7 @@ void setup() {
   pinMode(TRIGGER_PIN, OUTPUT);
   pinMode(ECHO_PIN, INPUT);
   pinMode(LED_PIN, OUTPUT);
+  digitalWrite(LED_PIN, LOW);
 
   Serial.begin(115200);
   WiFi.begin(ssid, password);
@@ -174,6 +240,7 @@ void setup() {
     delay(500);
     Serial.print(".");
   }
+  Serial.println("\nConectado a WiFi");
 
   if (!MDNS.begin("sensor")) {
     Serial.println("Error iniciando mDNS");
@@ -184,7 +251,6 @@ void setup() {
   server.on("/data", handleData);
   server.on("/led/on", handleLedOn);
   server.on("/led/off", handleLedOff);
-
   server.begin();
   MDNS.addService("http", "tcp", 80);
 }
@@ -203,44 +269,4 @@ void loop() {
       digitalWrite(LED_PIN, LOW);
     }
   }
-}
-String urlencode(String str) {
-  String encodedString = "";
-  char c;
-  char code0;
-  char code1;
-  for (int i = 0; i < str.length(); i++) {
-    c = str.charAt(i);
-    if (isalnum(c)) {
-      encodedString += c;
-    } else {
-      code1 = (c & 0xf) + '0';
-      if ((c & 0xf) > 9) code1 = (c & 0xf) - 10 + 'A';
-      c = (c >> 4) & 0xf;
-      code0 = c + '0';
-      if (c > 9) code0 = c - 10 + 'A';
-      encodedString += '%';
-      encodedString += code0;
-      encodedString += code1;
-    }
-  }
-  return encodedString;
-}
-void sendWhatsAppMessage(const String& message) {
-  HTTPClient http;
-
-  String phoneNumber = "573135381900";  // Reemplaza con tu número (sin +)
-  String apiKey = "4009828";         // Reemplaza con tu API Key
-  String url = "https://api.callmebot.com/whatsapp.php?phone=" + phoneNumber + "&text=" + urlencode(message) + "&apikey=" + apiKey;
-
-  http.begin(url);
-  int httpCode = http.GET();
-
-  if (httpCode > 0) {
-    Serial.println("Mensaje enviado con éxito.");
-  } else {
-    Serial.println("Error al enviar mensaje. Código: " + String(httpCode));
-  }
-
-  http.end();
 }
