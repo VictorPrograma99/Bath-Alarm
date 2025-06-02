@@ -4,6 +4,9 @@
 #include <WiFi.h>
 #include <WebServer.h>
 #include <ESPmDNS.h>
+#include <HTTPClient.h>
+#include <WiFiClient.h>
+
 
 // Red WiFi
 const char* ssid = "MI GATO ESTIBEN_2.4GHZ";
@@ -18,6 +21,7 @@ const char* password = "Colombia2025";
 
 WebServer server(80);
 
+bool mensajeEnviado = false;
 bool ledManual = false;
 unsigned long lastBlink = 0;
 bool ledState = false;
@@ -119,7 +123,6 @@ void handleRoot() {
 void handleData() {
   long distance = readDistance();
 
-  // Lógica para detectar presencia
   if (distance > 0 && distance < 60) {
     if (!objectDetected) {
       presenceStartTime = millis();
@@ -129,12 +132,14 @@ void handleData() {
     objectDetected = false;
     presenceStartTime = 0;
     ledShouldBlink = false;
+    mensajeEnviado = false;  // Reinicia cuando ya no hay persona
   }
 
   unsigned long elapsedTime = objectDetected ? (millis() - presenceStartTime) / 1000 : 0;
 
-  if (elapsedTime >= 10) {
-    ledShouldBlink = true;
+  if (elapsedTime >= 10 && !mensajeEnviado) {
+    sendWhatsAppMessage("¡Se detectó una persona durante más de 10 segundos!");
+    mensajeEnviado = true;
   }
 
   String json = "{\"distancia\":" + String(distance) + ",\"tiempo\":" + String(elapsedTime) + "}";
@@ -198,4 +203,44 @@ void loop() {
       digitalWrite(LED_PIN, LOW);
     }
   }
+}
+String urlencode(String str) {
+  String encodedString = "";
+  char c;
+  char code0;
+  char code1;
+  for (int i = 0; i < str.length(); i++) {
+    c = str.charAt(i);
+    if (isalnum(c)) {
+      encodedString += c;
+    } else {
+      code1 = (c & 0xf) + '0';
+      if ((c & 0xf) > 9) code1 = (c & 0xf) - 10 + 'A';
+      c = (c >> 4) & 0xf;
+      code0 = c + '0';
+      if (c > 9) code0 = c - 10 + 'A';
+      encodedString += '%';
+      encodedString += code0;
+      encodedString += code1;
+    }
+  }
+  return encodedString;
+}
+void sendWhatsAppMessage(const String& message) {
+  HTTPClient http;
+
+  String phoneNumber = "573135381900";  // Reemplaza con tu número (sin +)
+  String apiKey = "4009828";         // Reemplaza con tu API Key
+  String url = "https://api.callmebot.com/whatsapp.php?phone=" + phoneNumber + "&text=" + urlencode(message) + "&apikey=" + apiKey;
+
+  http.begin(url);
+  int httpCode = http.GET();
+
+  if (httpCode > 0) {
+    Serial.println("Mensaje enviado con éxito.");
+  } else {
+    Serial.println("Error al enviar mensaje. Código: " + String(httpCode));
+  }
+
+  http.end();
 }
